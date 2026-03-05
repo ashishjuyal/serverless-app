@@ -11,9 +11,11 @@ Gain full visibility into your AI document-processing pipeline with structured l
 3. [How the Observability Stack Works](#how-the-observability-stack-works)
 4. [Prerequisites](#prerequisites)
 5. [Part 1 — Structured Logging with AWS Lambda Powertools](#part-1--structured-logging-with-aws-lambda-powertools)
-6. [Part 2 — Log Forwarder Lambda](#part-2--log-forwarder-lambda)
+6. [Part 2 — Log Forwarder Lambda (common_services)](#part-2--log-forwarder-lambda-common_services)
 7. [Part 3 — CDK Infrastructure Changes](#part-3--cdk-infrastructure-changes)
-8. [Part 4 — Deploy & Verify](#part-4--deploy--verify)
+   - [3a — LogForwarderStack (common_services)](#part-3a--logforwarderstack-common_services)
+   - [3b — AiDocProcessorStack (services)](#part-3b--aidocprocessorstack-services)
+8. [Part 4 — CDK Deployment Steps](#part-4--cdk-deployment-steps)
 9. [Part 5 — OpenSearch Dashboards](#part-5--opensearch-dashboards)
 10. [Verify & Validate](#verify--validate)
 11. [Troubleshooting](#troubleshooting)
@@ -332,14 +334,24 @@ except Exception as exc:
 
 ---
 
-## Part 2 — Log Forwarder Lambda
+## Part 2 — Log Forwarder Lambda (common_services)
 
-Create a new directory for the forwarder:
+The Log Forwarder is a **shared service** — any service in the mono-repo can subscribe its CloudWatch Log Group to it. It lives under `common_services/` rather than inside any single service's `app/` folder.
 
 ```
-services/ai-doc-processor/app/log_forwarder/
-├── lambda_function.py
-└── requirements.txt
+common_services/
+└── log-forwarder/
+    ├── app/
+    │   └── log_forwarder/
+    │       ├── lambda_function.py     ← Lambda handler
+    │       └── requirements.txt       ← opensearch-py, boto3
+    └── infra/
+        ├── app.py                     ← CDK entry point
+        ├── cdk.json
+        ├── requirements.txt           ← aws-cdk-lib, constructs
+        ├── requirements-dev.txt       ← pytest
+        └── stack/
+            └── log_forwarder_stack.py ← owns OpenSearch domain + Lambda
 ```
 
 ### log_forwarder/requirements.txt
@@ -469,99 +481,44 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
 ## Part 3 — CDK Infrastructure Changes
 
-All changes are in `services/ai-doc-processor/infra/stack/ai_doc_processor_stack.py`.
+The observability stack spans **two independent CDK stacks** in this mono-repo:
 
-### Step 1: Update the imports
+| Stack | Location | Owns |
+|---|---|---|
+| `LogForwarderStack` | `common_services/log-forwarder/infra/` | OpenSearch domain + Log Forwarder Lambda |
+| `AiDocProcessorStack` | `services/ai-doc-processor/infra/` | Log Group, Subscription Filter, CloudWatch Alarms |
 
-Add four new services to the existing `aws_cdk` import tuple, and add `aws_cdk as cdk` at the top:
+The stacks are linked by a **named CloudFormation export**: `LogForwarderStack` exports the Lambda ARN; `AiDocProcessorStack` imports it with `cdk.Fn.import_value()`.
+
+---
+
+### Part 3a — LogForwarderStack (common_services)
+
+File: `common_services/log-forwarder/infra/stack/log_forwarder_stack.py`
+
+#### Step 1: Imports
 
 ```python
 import aws_cdk as cdk
 from aws_cdk import (
-    aws_lambda as _lambda,
-    aws_s3 as s3,
-    aws_s3_notifications as s3n,
-    aws_apigateway as apigw,
-    CfnOutput,
-    aws_ecr as ecr,
     aws_iam as iam,
-    RemovalPolicy,
-    Duration,
-    # ── Observability additions ──────────────────────────────────────────
-    aws_logs as logs,
-    aws_logs_destinations as logs_destinations,
+    aws_lambda as _lambda,
     aws_opensearchservice as opensearch,
-    aws_cloudwatch as cloudwatch,
+    CfnOutput,
+    Duration,
+    RemovalPolicy,
 )
+from constructs import Construct
+from constructs_lib.base_lambda_stack import BaseServiceStack
 ```
 
-All four are part of `aws-cdk-lib` — no changes to `infra/requirements.txt` are needed.
-
-### Step 2: Add `SERVICE_NAME` build arg to the orchestrator Lambda
-
-In the `DockerImageCode.from_image_asset()` call, add `"SERVICE_NAME"` to `build_args` and pass the Powertools environment variables as Lambda environment variables:
-
-```python
-orchestrator_lambda = _lambda.DockerImageFunction(
-    self,
-    "DocumentProcessingOrchestrator",
-    function_name=orchestrator_lambda_name,
-    code=_lambda.DockerImageCode.from_image_asset(
-        "../app/orchestrator",
-        build_args={
-            "MODEL_ID": f"arn:aws:bedrock:{region}:{account}:...",
-            "PROMPT_BUCKET": "prompts-dev",
-            "PROMPT_KEY": "orchestrator/Orchestrator.txt",
-            "SERVICE_NAME": "ai-doc-processor",    # ← ADD
-        },
-    ),
-    timeout=Duration.minutes(10),
-    reserved_concurrent_executions=1,
-    environment={                                   # ← ADD
-        "ENV_NAME": self.env_name,
-        "SERVICE_NAME": "ai-doc-processor",
-        "POWERTOOLS_SERVICE_NAME": "ai-doc-processor",
-        "POWERTOOLS_METRICS_NAMESPACE": "AIDocProcessor",
-        "LOG_LEVEL": "INFO",
-    },
-)
-```
-
-### Step 3: Grant the orchestrator Lambda permission to publish EMF metrics
-
-```python
-orchestrator_lambda.add_to_role_policy(
-    iam.PolicyStatement(
-        actions=["cloudwatch:PutMetricData"],
-        resources=["*"],
-        conditions={"StringEquals": {"cloudwatch:namespace": "AIDocProcessor"}},
-    )
-)
-```
-
-The condition restricts the permission to only the `AIDocProcessor` namespace — following least-privilege.
-
-### Step 4: Declare the CloudWatch Log Group explicitly
-
-```python
-log_group = logs.LogGroup(
-    self,
-    "OrchestratorLogGroup",
-    log_group_name=f"/aws/lambda/{orchestrator_lambda_name}",
-    retention=logs.RetentionDays.ONE_MONTH,
-    removal_policy=RemovalPolicy.DESTROY,
-)
-```
-
-> **Why declare it explicitly?** By default, Lambda auto-creates its log group with no retention policy — logs accumulate forever. Declaring the log group in CDK lets you set `retention` and a `removal_policy`, and it becomes the object you attach the subscription filter to.
-
-### Step 5: Create the OpenSearch domain
+#### Step 2: OpenSearch domain
 
 ```python
 domain = opensearch.Domain(
     self,
     "ObservabilityDomain",
-    domain_name=f"ai-doc-logs-{self.env_name}",
+    domain_name=f"common-logs-{self.env_name}",
     version=opensearch.EngineVersion.OPENSEARCH_2_11,
     capacity=opensearch.CapacityConfig(
         data_nodes=1,
@@ -587,7 +544,7 @@ domain.add_access_policies(
 )
 ```
 
-> **Provisioning time:** OpenSearch domains take 10–15 minutes to provision. CDK will show `CREATE_IN_PROGRESS` during this time — this is normal.
+> **Provisioning time:** OpenSearch domains take 10–15 minutes to provision on first deploy. CDK will show `CREATE_IN_PROGRESS` — this is normal.
 
 > **Dev vs production sizing:**
 >
@@ -599,9 +556,9 @@ domain.add_access_policies(
 > | Dedicated master | No | Yes (3 nodes) |
 > | Fine-grained access control | No | Yes (Kibana master user) |
 
-### Step 6: Create the Log Forwarder Lambda
+#### Step 3: Log Forwarder Lambda
 
-CDK's `BundlingOptions` installs the Python dependencies at deploy time using the Lambda build image (Docker must be running):
+CDK's `BundlingOptions` installs `opensearch-py` at deploy time using the Lambda build image (Docker must be running):
 
 ```python
 log_forwarder_lambda = _lambda.Function(
@@ -629,29 +586,145 @@ log_forwarder_lambda = _lambda.Function(
     },
 )
 
-# Grant the forwarder Lambda read/write access to the OpenSearch domain
+# Grant the forwarder Lambda read/write access to OpenSearch
 domain.grant_read_write(log_forwarder_lambda)
 ```
 
-### Step 7: Wire the subscription filter
+#### Step 4: Export outputs for cross-stack use
+
+```python
+CfnOutput(
+    self, "LogForwarderArn",
+    value=log_forwarder_lambda.function_arn,
+    export_name=f"LogForwarderArn-{self.env_name}",      # ← consumed by AiDocProcessorStack
+)
+CfnOutput(
+    self, "OpenSearchDashboardUrl",
+    value=f"https://{domain.domain_endpoint}/_dashboards",
+    export_name=f"OpenSearchDashboardUrl-{self.env_name}",
+)
+CfnOutput(
+    self, "OpenSearchDomainEndpoint",
+    value=domain.domain_endpoint,
+    export_name=f"OpenSearchEndpoint-{self.env_name}",
+)
+```
+
+---
+
+### Part 3b — AiDocProcessorStack (services)
+
+File: `services/ai-doc-processor/infra/stack/ai_doc_processor_stack.py`
+
+#### Step 1: Update imports — add observability modules
+
+```python
+import aws_cdk as cdk
+from aws_cdk import (
+    aws_lambda as _lambda,
+    aws_s3 as s3,
+    aws_s3_notifications as s3n,
+    aws_apigateway as apigw,
+    CfnOutput,
+    aws_ecr as ecr,
+    aws_iam as iam,
+    RemovalPolicy,
+    Duration,
+    # ── Observability additions ──────────────────────────────────────────
+    aws_logs as logs,
+    aws_logs_destinations as logs_destinations,
+    aws_cloudwatch as cloudwatch,
+)
+```
+
+> **Note:** `aws_opensearchservice` is **not** imported here — OpenSearch is owned by `LogForwarderStack`.
+
+#### Step 2: Add SERVICE_NAME build arg and Powertools env vars to the orchestrator Lambda
+
+```python
+orchestrator_lambda = _lambda.DockerImageFunction(
+    self,
+    "DocumentProcessingOrchestrator",
+    function_name=orchestrator_lambda_name,
+    code=_lambda.DockerImageCode.from_image_asset(
+        "../app/orchestrator",
+        build_args={
+            "MODEL_ID": f"arn:aws:bedrock:{region}:{account}:...",
+            "PROMPT_BUCKET": "prompts-dev",
+            "PROMPT_KEY": "orchestrator/Orchestrator.txt",
+            "SERVICE_NAME": "ai-doc-processor",    # ← ADD
+        },
+    ),
+    timeout=Duration.minutes(10),
+    reserved_concurrent_executions=1,
+    environment={                                   # ← ADD
+        "ENV_NAME": self.env_name,
+        "SERVICE_NAME": "ai-doc-processor",
+        "POWERTOOLS_SERVICE_NAME": "ai-doc-processor",
+        "POWERTOOLS_METRICS_NAMESPACE": "AIDocProcessor",
+        "LOG_LEVEL": "INFO",
+    },
+)
+```
+
+#### Step 3: Grant the orchestrator Lambda permission to publish EMF metrics
+
+```python
+orchestrator_lambda.add_to_role_policy(
+    iam.PolicyStatement(
+        actions=["cloudwatch:PutMetricData"],
+        resources=["*"],
+        conditions={"StringEquals": {"cloudwatch:namespace": "AIDocProcessor"}},
+    )
+)
+```
+
+#### Step 4: Declare the CloudWatch Log Group explicitly
+
+```python
+log_group = logs.LogGroup(
+    self,
+    "OrchestratorLogGroup",
+    log_group_name=f"/aws/lambda/{orchestrator_lambda_name}",
+    retention=logs.RetentionDays.ONE_MONTH,
+    removal_policy=RemovalPolicy.DESTROY,
+)
+```
+
+> **Why declare it explicitly?** By default, Lambda auto-creates its log group with no retention policy — logs accumulate forever. Declaring it in CDK sets `retention` and makes it the subscription filter attachment point.
+
+#### Step 5: Import the Log Forwarder Lambda via cross-stack reference
+
+```python
+# Import the ARN exported by LogForwarderStack — no direct stack dependency needed
+log_forwarder_fn = _lambda.Function.from_function_arn(
+    self,
+    "ImportedLogForwarder",
+    function_arn=cdk.Fn.import_value(f"LogForwarderArn-{self.env_name}"),
+)
+```
+
+> **Deployment prerequisite:** `LogForwarderStack` must be deployed first so the CloudFormation export `LogForwarderArn-{env_name}` exists. The CI/CD pipeline enforces this via the `needs` dependency.
+
+#### Step 6: Wire the CloudWatch Logs subscription filter
 
 ```python
 logs.SubscriptionFilter(
     self,
     "OrchestratorLogSubscription",
     log_group=log_group,
-    destination=logs_destinations.LambdaDestination(log_forwarder_lambda),
+    destination=logs_destinations.LambdaDestination(log_forwarder_fn),
     filter_pattern=logs.FilterPattern.all_events(),
 )
 ```
 
-`filter_pattern=logs.FilterPattern.all_events()` forwards every log line.  To forward only errors and warnings, use:
+To forward only errors and warnings instead of all events:
 
 ```python
 filter_pattern=logs.FilterPattern.any_term("ERROR", "WARNING", "CRITICAL")
 ```
 
-### Step 8: Add CloudWatch Alarms
+#### Step 7: Add CloudWatch Alarms
 
 ```python
 error_alarm = cloudwatch.Alarm(
@@ -686,60 +759,195 @@ throttle_alarm = cloudwatch.Alarm(
 )
 ```
 
-### Step 9: Add CloudFormation outputs
+#### Step 8: Add CloudFormation outputs
 
 ```python
 CfnOutput(self, "ApiUrl", value=api.url)
 
 CfnOutput(
-    self, "OpenSearchDashboardUrl",
-    value=f"https://{domain.domain_endpoint}/_dashboards",
-    description="OpenSearch Dashboards URL",
-)
-CfnOutput(
-    self, "OpenSearchDomainEndpoint",
-    value=domain.domain_endpoint,
-    description="OpenSearch domain endpoint for direct API access",
-)
-CfnOutput(
     self, "LogGroupName",
     value=log_group.log_group_name,
     description="CloudWatch Log Group for the orchestrator Lambda",
+)
+
+# Re-surface the OpenSearch Dashboards URL from the shared stack
+CfnOutput(
+    self, "OpenSearchDashboardUrl",
+    value=cdk.Fn.import_value(f"OpenSearchDashboardUrl-{self.env_name}"),
+    description="OpenSearch Dashboards URL (provisioned by LogForwarderStack)",
 )
 ```
 
 ---
 
-## Part 4 — Deploy & Verify
+## Part 4 — CDK Deployment Steps
 
-### Synth first (validates template without deploying)
+> **Deploy order is mandatory.** `LogForwarderStack` must be deployed before `AiDocProcessorStack` because the service stack imports the Log Forwarder Lambda ARN via a CloudFormation named export. The CI/CD pipeline enforces this automatically via job dependencies.
+
+### Prerequisites — set up virtual environments
+
+Each CDK app has its own Python environment. Set them up once:
+
+```bash
+# ── Log Forwarder (common_services) ──────────────────────────────────────────
+cd common_services/log-forwarder/infra
+python -m venv .venv
+
+# Activate
+source .venv/bin/activate       # Linux / macOS / WSL
+.venv\Scripts\activate          # Windows PowerShell
+
+pip install -r requirements.txt
+pip install -e ../../../shared   # shared constructs_lib
+
+deactivate
+
+# ── AI Doc Processor (services) ──────────────────────────────────────────────
+cd ../../../services/ai-doc-processor/infra
+python -m venv .venv
+
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e ../../../shared
+
+deactivate
+```
+
+---
+
+### Step 1 — Synth both stacks (validates templates, no AWS calls)
+
+```bash
+# Synth LogForwarderStack
+cd common_services/log-forwarder/infra
+source .venv/bin/activate
+
+cdk synth \
+  -c account=<ACCOUNT_ID> \
+  -c region=ap-southeast-2
+
+deactivate
+```
+
+Expected: CloudFormation template printed to stdout with no errors. Confirm the three exports appear:
+
+```bash
+cdk synth -c account=<ACCOUNT_ID> -c region=ap-southeast-2 2>/dev/null \
+  | grep -A2 "Export"
+# Expected: LogForwarderArn-dev, OpenSearchDashboardUrl-dev, OpenSearchEndpoint-dev
+```
+
+```bash
+# Synth AiDocProcessorStack
+cd services/ai-doc-processor/infra
+source .venv/bin/activate
+
+cdk synth \
+  -c account=<ACCOUNT_ID> \
+  -c region=ap-southeast-2
+
+deactivate
+```
+
+Expected: template synthesises without error. The `Fn::ImportValue` references for `LogForwarderArn-dev` and `OpenSearchDashboardUrl-dev` will be visible in the template.
+
+---
+
+### Step 2 — Deploy LogForwarderStack (first, always)
+
+```bash
+cd common_services/log-forwarder/infra
+source .venv/bin/activate
+
+cdk deploy LogForwarderStack \
+  -c account=<ACCOUNT_ID> \
+  -c region=ap-southeast-2
+```
+
+> **This step takes 10–15 minutes** on a first deploy while CloudFormation provisions the OpenSearch domain. Subsequent deploys are fast (Lambda code update only).
+
+Watch for the progress output:
+
+```
+LogForwarderStack: deploying...
+LogForwarderStack | 0/5 | CREATE_IN_PROGRESS  | AWS::OpenSearchService::Domain | ObservabilityDomain
+LogForwarderStack | 0/5 | CREATE_IN_PROGRESS  | AWS::Lambda::Function          | LogForwarderLambda
+...
+LogForwarderStack | 5/5 | CREATE_COMPLETE
+
+ ✅  LogForwarderStack
+
+Outputs:
+LogForwarderStack.LogForwarderArn         = arn:aws:lambda:ap-southeast-2:<ACCOUNT>:function:LogForwarder-dev
+LogForwarderStack.OpenSearchDashboardUrl  = https://search-common-logs-dev-<hash>.ap-southeast-2.es.amazonaws.com/_dashboards
+LogForwarderStack.OpenSearchDomainEndpoint= search-common-logs-dev-<hash>.ap-southeast-2.es.amazonaws.com
+```
+
+Confirm the CloudFormation exports are live:
+
+```bash
+aws cloudformation list-exports \
+  --region ap-southeast-2 \
+  --query 'Exports[?starts_with(Name, `LogForwarder`) || starts_with(Name, `OpenSearch`)].{Name:Name,Value:Value}' \
+  --output table
+```
+
+Expected:
+
+```
+---------------------------------------------------------------------------
+|                             ListExports                                 |
++----------------------------------+--------------------------------------+
+|  Name                            |  Value                               |
++----------------------------------+--------------------------------------+
+|  LogForwarderArn-dev             |  arn:aws:lambda:ap-southeast-2:...  |
+|  OpenSearchDashboardUrl-dev      |  https://search-common-logs-dev-... |
+|  OpenSearchEndpoint-dev          |  search-common-logs-dev-...          |
++----------------------------------+--------------------------------------+
+```
+
+---
+
+### Step 3 — Deploy AiDocProcessorStack (after LogForwarderStack is live)
 
 ```bash
 cd services/ai-doc-processor/infra
+source .venv/bin/activate
 
-# Activate virtual environment
-source .venv/bin/activate   # Linux/macOS
-.venv\Scripts\activate      # Windows
-
-# Synth to validate CDK template
-cdk synth -c account=<ACCOUNT_ID> -c region=ap-southeast-2
-```
-
-Expected output: no errors, a CloudFormation template printed to stdout.
-
-### Deploy
-
-```bash
 cdk deploy AIDocProcessorStack \
   -c account=<ACCOUNT_ID> \
   -c region=ap-southeast-2
 ```
 
-> **First deploy with OpenSearch will take 10–15 minutes** while the domain provisions. Subsequent deploys (code changes only) are much faster.
+```
+AIDocProcessorStack: deploying...
+AIDocProcessorStack | 1/8 | CREATE_COMPLETE | AWS::Logs::LogGroup              | OrchestratorLogGroup
+AIDocProcessorStack | 2/8 | CREATE_COMPLETE | AWS::Logs::SubscriptionFilter    | OrchestratorLogSubscription
+AIDocProcessorStack | 3/8 | CREATE_COMPLETE | AWS::CloudWatch::Alarm           | OrchestratorErrorAlarm
+...
+AIDocProcessorStack | 8/8 | UPDATE_COMPLETE
 
-### Confirm the CloudFormation outputs
+ ✅  AIDocProcessorStack
+
+Outputs:
+AIDocProcessorStack.ApiUrl               = https://xxxx.execute-api.ap-southeast-2.amazonaws.com/prod/
+AIDocProcessorStack.LogGroupName         = /aws/lambda/OrchestratorContainer-dev
+AIDocProcessorStack.OpenSearchDashboardUrl = https://search-common-logs-dev-.../_dashboards
+```
+
+---
+
+### Step 4 — Confirm all outputs
 
 ```bash
+# LogForwarderStack outputs
+aws cloudformation describe-stacks \
+  --stack-name LogForwarderStack \
+  --region ap-southeast-2 \
+  --query 'Stacks[0].Outputs' \
+  --output table
+
+# AiDocProcessorStack outputs
 aws cloudformation describe-stacks \
   --stack-name AIDocProcessorStack \
   --region ap-southeast-2 \
@@ -747,49 +955,36 @@ aws cloudformation describe-stacks \
   --output table
 ```
 
-Expected output:
+---
 
-```
----------------------------------------------------------------------
-|                        DescribeStacks                             |
-+----------------------------+--------------------------------------+
-|  OutputKey                 |  OutputValue                         |
-+----------------------------+--------------------------------------+
-|  ApiUrl                    |  https://xxxx.execute-api.ap-...    |
-|  OpenSearchDashboardUrl    |  https://search-ai-doc-logs-dev-... |
-|  OpenSearchDomainEndpoint  |  search-ai-doc-logs-dev-xxx...      |
-|  LogGroupName              |  /aws/lambda/OrchestratorContainer.. |
-+----------------------------+--------------------------------------+
-```
-
-### Trigger a test invocation
-
-Upload a file to the S3 bucket to trigger the orchestrator:
+### Step 5 — Trigger a test invocation
 
 ```bash
-# Get the bucket name from CDK output or CLI
+# Get the S3 bucket name
 BUCKET=$(aws cloudformation describe-stacks \
   --stack-name AIDocProcessorStack \
   --region ap-southeast-2 \
   --query 'Stacks[0].Outputs[?contains(OutputKey,`Bucket`)].OutputValue' \
   --output text)
 
-# Upload a test invoice
+# Upload a test invoice to trigger the orchestrator Lambda
 echo '{"invoice_number": "INV-001", "amount": 1500}' > test-invoice.json
 aws s3 cp test-invoice.json s3://${BUCKET}/test-invoice.json
 ```
 
-### Check logs are flowing
+---
+
+### Step 6 — Verify logs are flowing
 
 ```bash
-# 1. Verify structured logs in CloudWatch
+# 1. Structured JSON logs from the orchestrator Lambda
 aws logs tail /aws/lambda/OrchestratorContainer-dev \
   --follow \
   --format short \
   --region ap-southeast-2
 ```
 
-You should see JSON-formatted log lines, e.g.:
+Expected structured JSON output:
 
 ```json
 {"level":"INFO","message":"Lambda handler started","service":"ai-doc-processor","cold_start":true,...}
@@ -798,17 +993,29 @@ You should see JSON-formatted log lines, e.g.:
 ```
 
 ```bash
-# 2. Verify the Log Forwarder Lambda is being invoked
+# 2. Log Forwarder Lambda confirming it indexed into OpenSearch
 aws logs tail /aws/lambda/LogForwarder-dev \
   --follow \
   --format short \
   --region ap-southeast-2
 ```
 
-Expected: lines like:
+Expected:
+
 ```
 Forwarded 4/4 log events from /aws/lambda/OrchestratorContainer-dev → lambda-logs
 ```
+
+---
+
+### Redeploying after code changes
+
+| What changed | Command |
+|---|---|
+| Log Forwarder Lambda code only | `cd common_services/log-forwarder/infra && cdk deploy LogForwarderStack ...` |
+| Orchestrator Lambda code only | `cd services/ai-doc-processor/infra && cdk deploy AIDocProcessorStack ...` |
+| Both | Deploy `LogForwarderStack` first, then `AIDocProcessorStack` |
+| OpenSearch config | Deploy `LogForwarderStack` — domain update may take 10+ min |
 
 ---
 
