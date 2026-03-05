@@ -149,11 +149,14 @@ class AiDocProcessorStack(BaseServiceStack):
         # from_function_arn() returns an IFunction whose addPermission() is a
         # no-op, so LambdaDestination cannot add the policy automatically.
         # We must create the resource-based policy explicitly.
+        # Use the function NAME (not Fn::ImportValue ARN) so CloudFormation's
+        # EarlyValidation ResourceExistenceCheck can resolve it at ChangeSet time.
+        log_forwarder_fn_name = f"LogForwarder-{self.env_name}"
         cfn_invoke_permission = _lambda.CfnPermission(
             self,
             "CloudWatchLogsInvokeLogForwarder",
             action="lambda:InvokeFunction",
-            function_name=log_forwarder_fn.function_arn,
+            function_name=log_forwarder_fn_name,
             principal=f"logs.{region}.amazonaws.com",
             source_account=account,
             source_arn=log_group.log_group_arn,
