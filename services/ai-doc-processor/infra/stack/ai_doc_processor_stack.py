@@ -145,16 +145,35 @@ class AiDocProcessorStack(BaseServiceStack):
             function_arn=cdk.Fn.import_value(f"LogForwarderArn-{self.env_name}"),
         )
 
-        # ── 3. Subscription Filter → shared Log Forwarder Lambda ──────────
+        # ── 3a. Grant CloudWatch Logs permission to invoke the imported Lambda ─
+        # from_function_arn() returns an IFunction whose addPermission() is a
+        # no-op, so LambdaDestination cannot add the policy automatically.
+        # We must create the resource-based policy explicitly.
+        cfn_invoke_permission = _lambda.CfnPermission(
+            self,
+            "CloudWatchLogsInvokeLogForwarder",
+            action="lambda:InvokeFunction",
+            function_name=log_forwarder_fn.function_arn,
+            principal=f"logs.{region}.amazonaws.com",
+            source_account=account,
+            source_arn=log_group.log_group_arn,
+        )
+
+        # ── 3b. Subscription Filter → shared Log Forwarder Lambda ──────────
         # Every log line written by the orchestrator is forwarded to the
         # Log Forwarder Lambda in near-real time (< 15 s typical latency).
-        logs.SubscriptionFilter(
+        subscription = logs.SubscriptionFilter(
             self,
             "OrchestratorLogSubscription",
             log_group=log_group,
-            destination=logs_destinations.LambdaDestination(log_forwarder_fn),
+            destination=logs_destinations.LambdaDestination(
+                log_forwarder_fn, add_permissions=False
+            ),
             filter_pattern=logs.FilterPattern.all_events(),
         )
+        # CloudFormation has no implicit dependency between the two resources;
+        # force it to create the permission before the subscription filter.
+        subscription.node.default_child.add_depends_on(cfn_invoke_permission)
 
         # ── 4. CloudWatch Alarms ───────────────────────────────────────────
         error_alarm = cloudwatch.Alarm(
