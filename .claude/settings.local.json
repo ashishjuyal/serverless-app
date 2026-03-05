@@ -10,7 +10,15 @@
       "Bash(pip show aws-cdk-lib)",
       "Bash(python3 -c \"from aws_cdk import aws_codedeploy; print\\(dir\\(aws_codedeploy\\)\\)\")",
       "Bash(python3 -c \":*)",
-      "Bash(pip3 show aws-cdk-lib)"
+      "Bash(pip3 show aws-cdk-lib)",
+      "Bash(git add .github/workflows/pipeline.yml services/ai-doc-processor/app/orchestrator/Dockerfile services/ai-doc-processor/app/orchestrator/lambda_function.py services/ai-doc-processor/app/orchestrator/requirements.txt services/ai-doc-processor/infra/stack/ai_doc_processor_stack.py common_services/ serverless-labs/06-serverless-observability.md)",
+      "Bash(git push -u origin elk)",
+      "Bash(gh pr:*)",
+      "Bash(where gh)",
+      "Bash(winget list --name \"GitHub CLI\")",
+      "Bash(git add common_services/log-forwarder/infra/tests/unit/test_log_forwarder_stack.py)",
+      "Bash(git commit:*)",
+      "Bash(git push)"
     ]
   }
 }
