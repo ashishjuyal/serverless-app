@@ -33,6 +33,8 @@ class AiDocProcessorStack(BaseServiceStack):
             self,
             "AIDocProcessorImageRepo",
             repository_name=f"ai-doc-processor-repo-{self.env_name}",
+            removal_policy=RemovalPolicy.DESTROY,
+            empty_on_delete=True,
         )
 
         # ── S3 bucket (document uploads trigger the pipeline) ──────────────
