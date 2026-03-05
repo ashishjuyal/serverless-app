@@ -1,4 +1,5 @@
 boto3
 strands-agents
 strands-agents-tools
+aws-lambda-powertools[all]
 # Dependencies for AWS Textract and AWS Bedrock are included in boto3

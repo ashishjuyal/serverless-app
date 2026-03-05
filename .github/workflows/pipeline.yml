@@ -2,11 +2,11 @@ name: Mono-Repo DevSecOps Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ elk ]
     paths-ignore:
       - 'serverless-labs/**'
   pull_request:
-    branches: [ main ]
+    branches: [ elk ]
     paths-ignore:
       - 'serverless-labs/**'
 
@@ -30,6 +30,7 @@ jobs:
     outputs:
       ai-doc-processor: ${{ steps.filter.outputs.ai-doc-processor }}
       invoice-notifier: ${{ steps.filter.outputs.invoice-notifier }}
+      log-forwarder:    ${{ steps.filter.outputs.log-forwarder }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,6 +43,9 @@ jobs:
               - 'shared/**'
             invoice-notifier:
               - 'services/invoice-notifier/**'
+              - 'shared/**'
+            log-forwarder:
+              - 'common_services/log-forwarder/**'
               - 'shared/**'
 
 
@@ -165,19 +169,94 @@ jobs:
 
 
 # ─────────────────────────────────────────────────────────────
-# JOB 3 — DEPLOY ai-doc-processor
+# JOB 2c — TEST: log-forwarder
+# ─────────────────────────────────────────────────────────────
+  test-log-forwarder:
+    name: Test — log-forwarder
+    runs-on: ubuntu-latest
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.log-forwarder == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: common_services/log-forwarder/infra
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ../../../shared
+
+      - name: Run tests
+        working-directory: common_services/log-forwarder/infra
+        run: pytest tests/ -v
+
+
+# ─────────────────────────────────────────────────────────────
+# JOB 3a — DEPLOY log-forwarder  (must run before ai-doc-processor)
+# ─────────────────────────────────────────────────────────────
+  deploy-log-forwarder:
+    name: Deploy — log-forwarder
+    runs-on: ubuntu-latest
+    needs: [detect-changes, test-log-forwarder, security]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/elk' &&
+      needs.detect-changes.outputs.log-forwarder == 'true' &&
+      (needs.test-log-forwarder.result == 'success' || needs.test-log-forwarder.result == 'skipped') &&
+      needs.security.result == 'success'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CDK dependencies
+        working-directory: common_services/log-forwarder/infra
+        run: |
+          pip install -r requirements.txt
+          pip install -e ../../../shared
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: npm install -g aws-cdk
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: CDK Deploy
+        working-directory: common_services/log-forwarder/infra
+        run: cdk deploy LogForwarderStack --require-approval never
+
+
+# ─────────────────────────────────────────────────────────────
+# JOB 3b — DEPLOY ai-doc-processor
+# Waits for deploy-log-forwarder so the CloudFormation export
+# LogForwarderArn-{env} is available before this stack deploys.
 # ─────────────────────────────────────────────────────────────
   deploy-ai-doc-processor:
     name: Deploy — ai-doc-processor
     runs-on: ubuntu-latest
-    needs: [detect-changes, test-ai-doc-processor, security]
+    needs: [detect-changes, test-ai-doc-processor, security, deploy-log-forwarder]
     if: |
       always() &&
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
+      github.ref == 'refs/heads/elk' &&
       needs.detect-changes.outputs.ai-doc-processor == 'true' &&
       (needs.test-ai-doc-processor.result == 'success' || needs.test-ai-doc-processor.result == 'skipped') &&
-      needs.security.result == 'success'
+      needs.security.result == 'success' &&
+      (needs.deploy-log-forwarder.result == 'success' || needs.deploy-log-forwarder.result == 'skipped')
 
     steps:
       - uses: actions/checkout@v4
@@ -208,8 +287,9 @@ jobs:
         working-directory: services/ai-doc-processor/infra
         run: cdk deploy AIDocProcessorStack --require-approval never
 
+
 # ─────────────────────────────────────────────────────────────
-# JOB — DEPLOY invoice-notifier
+# JOB 3c — DEPLOY invoice-notifier
 # ─────────────────────────────────────────────────────────────
   deploy-invoice-notifier:
     name: Deploy — invoice-notifier
@@ -218,7 +298,7 @@ jobs:
     if: |
       always() &&
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
+      github.ref == 'refs/heads/elk' &&
       needs.detect-changes.outputs.invoice-notifier == 'true' &&
       (needs.test-invoice-notifier.result == 'success' || needs.test-invoice-notifier.result == 'skipped') &&
       needs.security.result == 'success'
