@@ -2,11 +2,11 @@ name: Mono-Repo DevSecOps Pipeline
 
 on:
   push:
-    branches: [ elk ]
+    branches: [ main, elk ]
     paths-ignore:
       - 'serverless-labs/**'
   pull_request:
-    branches: [ elk ]
+    branches: [ main, elk ]
     paths-ignore:
       - 'serverless-labs/**'
 
