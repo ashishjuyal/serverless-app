@@ -34,6 +34,7 @@ Gain full visibility into your AI document-processing pipeline with structured l
 | Log shipping pipeline | **CloudWatch Logs subscription filter** → **Log Forwarder Lambda** → OpenSearch |
 | Visualisation | **OpenSearch Dashboards** (managed Kibana equivalent) |
 | Alerting | **CloudWatch Alarms** — errors, duration p95, throttles |
+| Dashboard authentication | **Fine-Grained Access Control (FGAC)** — username/password login; admin password auto-generated and stored in **AWS Secrets Manager** |
 
 After completing this lab your observability pipeline looks like this:
 
@@ -499,11 +500,14 @@ File: `common_services/log-forwarder/infra/stack/log_forwarder_stack.py`
 #### Step 1: Imports
 
 ```python
+import json
+
 import aws_cdk as cdk
 from aws_cdk import (
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_opensearchservice as opensearch,
+    aws_secretsmanager as secretsmanager,
     CfnOutput,
     Duration,
     RemovalPolicy,
@@ -512,7 +516,41 @@ from constructs import Construct
 from constructs_lib.base_lambda_stack import BaseServiceStack
 ```
 
-#### Step 2: OpenSearch domain
+> **Why `json` and `secretsmanager`?** FGAC requires a master-user password. Secrets Manager auto-generates a random password at deploy time; `json.dumps()` is used when building the secret template string.
+
+#### Step 2: Secrets Manager — master-user password
+
+A random 16-character password is auto-generated at deploy time and stored in Secrets Manager. The domain master user is `admin`.
+
+```python
+master_user_secret = secretsmanager.Secret(
+    self,
+    "OpenSearchMasterUserSecret",
+    secret_name=f"/opensearch/common-logs-{self.env_name}/master-user",
+    generate_secret_string=secretsmanager.SecretStringGenerator(
+        secret_string_template=json.dumps({"username": "admin"}),
+        generate_string_key="password",
+        exclude_characters=' %+~`#$&*()|[]{}:;<>?!\'/@"\\',
+        password_length=16,
+    ),
+    removal_policy=RemovalPolicy.DESTROY,
+)
+```
+
+> **Retrieve the password after deploy:**
+> ```bash
+> aws secretsmanager get-secret-value \
+>   --secret-id /opensearch/common-logs-dev/master-user \
+>   --region ap-southeast-2 \
+>   --query SecretString --output text
+> # {"username":"admin","password":"<generated-password>"}
+> ```
+
+#### Step 3: OpenSearch domain with Fine-Grained Access Control (FGAC)
+
+FGAC enables a native username/password login screen on Dashboards so browser
+requests work without IAM credentials. It requires `encryption_at_rest`,
+`node_to_node_encryption`, and `enforce_https` to all be `True`.
 
 ```python
 domain = opensearch.Domain(
@@ -523,6 +561,7 @@ domain = opensearch.Domain(
     capacity=opensearch.CapacityConfig(
         data_nodes=1,
         data_node_instance_type="t3.small.search",
+        multi_az_with_standby_enabled=False,  # T3 instances don't support Multi-AZ with standby
     ),
     ebs=opensearch.EbsOptions(
         enabled=True,
@@ -531,13 +570,20 @@ domain = opensearch.Domain(
     encryption_at_rest=opensearch.EncryptionAtRestOptions(enabled=True),
     node_to_node_encryption=True,
     enforce_https=True,
+    # FGAC requires all three security options above to be enabled.
+    fine_grained_access_control=opensearch.AdvancedSecurityOptions(
+        master_user_name="admin",
+        master_user_password=master_user_secret.secret_value_from_json("password"),
+    ),
     removal_policy=RemovalPolicy.DESTROY,
 )
 
-# Allow all IAM principals in this account to access the domain
+# Open domain-level access policy — FGAC handles fine-grained authorisation.
+# Without this, the domain would require every browser request to carry IAM
+# credentials. AnyPrincipal is safe here because FGAC is the real gate.
 domain.add_access_policies(
     iam.PolicyStatement(
-        principals=[iam.AccountPrincipal(account)],
+        principals=[iam.AnyPrincipal()],
         actions=["es:*"],
         resources=[f"{domain.domain_arn}/*"],
     )
@@ -554,11 +600,14 @@ domain.add_access_policies(
 > | Data nodes | 1 | 3+ (Multi-AZ) |
 > | EBS volume | 20 GB | 100+ GB |
 > | Dedicated master | No | Yes (3 nodes) |
-> | Fine-grained access control | No | Yes (Kibana master user) |
+> | Fine-grained access control | Yes — FGAC (username/password login) | Yes (SSO/SAML via identity provider) |
 
-#### Step 3: Log Forwarder Lambda
+> **Important:** FGAC **cannot be enabled on an existing domain**. If the domain was
+> created without FGAC, destroy the stack first (`cdk destroy`) before redeploying.
 
-CDK's `BundlingOptions` installs `opensearch-py` at deploy time using the Lambda build image (Docker must be running):
+#### Step 4: Log Forwarder Lambda
+
+`_LocalPipBundler` is tried first (host pip, no Docker needed); Docker is the fallback:
 
 ```python
 log_forwarder_lambda = _lambda.Function(
@@ -568,8 +617,9 @@ log_forwarder_lambda = _lambda.Function(
     runtime=_lambda.Runtime.PYTHON_3_12,
     handler="lambda_function.lambda_handler",
     code=_lambda.Code.from_asset(
-        "../app/log_forwarder",
+        _APP_DIR,
         bundling=cdk.BundlingOptions(
+            local=_LocalPipBundler(),
             image=_lambda.Runtime.PYTHON_3_12.bundling_image,
             command=[
                 "bash", "-c",
@@ -582,7 +632,7 @@ log_forwarder_lambda = _lambda.Function(
     environment={
         "OPENSEARCH_ENDPOINT": domain.domain_endpoint,
         "INDEX_NAME": "lambda-logs",
-        "AWS_REGION": region,
+        # AWS_REGION is injected automatically by the Lambda runtime.
     },
 )
 
@@ -590,7 +640,7 @@ log_forwarder_lambda = _lambda.Function(
 domain.grant_read_write(log_forwarder_lambda)
 ```
 
-#### Step 4: Export outputs for cross-stack use
+#### Step 5: Export outputs for cross-stack use
 
 ```python
 CfnOutput(
@@ -602,11 +652,22 @@ CfnOutput(
     self, "OpenSearchDashboardUrl",
     value=f"https://{domain.domain_endpoint}/_dashboards",
     export_name=f"OpenSearchDashboardUrl-{self.env_name}",
+    description="Sign in with username 'admin' and the password from the master-user secret",
 )
 CfnOutput(
     self, "OpenSearchDomainEndpoint",
     value=domain.domain_endpoint,
     export_name=f"OpenSearchEndpoint-{self.env_name}",
+)
+CfnOutput(
+    self, "OpenSearchMasterUserSecretArn",
+    value=master_user_secret.secret_arn,
+    description=(
+        "Retrieve Dashboards admin password: "
+        "aws secretsmanager get-secret-value "
+        "--secret-id /opensearch/common-logs-<env>/master-user "
+        "--query SecretString --output text"
+    ),
 )
 ```
 
@@ -870,18 +931,40 @@ Watch for the progress output:
 
 ```
 LogForwarderStack: deploying...
-LogForwarderStack | 0/5 | CREATE_IN_PROGRESS  | AWS::OpenSearchService::Domain | ObservabilityDomain
-LogForwarderStack | 0/5 | CREATE_IN_PROGRESS  | AWS::Lambda::Function          | LogForwarderLambda
+LogForwarderStack | 0/7 | CREATE_IN_PROGRESS  | AWS::SecretsManager::Secret    | OpenSearchMasterUserSecret
+LogForwarderStack | 1/7 | CREATE_COMPLETE     | AWS::SecretsManager::Secret    | OpenSearchMasterUserSecret
+LogForwarderStack | 1/7 | CREATE_IN_PROGRESS  | AWS::OpenSearchService::Domain | ObservabilityDomain
+LogForwarderStack | 1/7 | CREATE_IN_PROGRESS  | AWS::Lambda::Function          | LogForwarderLambda
 ...
-LogForwarderStack | 5/5 | CREATE_COMPLETE
+LogForwarderStack | 7/7 | CREATE_COMPLETE
 
  ✅  LogForwarderStack
 
 Outputs:
-LogForwarderStack.LogForwarderArn         = arn:aws:lambda:ap-southeast-2:<ACCOUNT>:function:LogForwarder-dev
-LogForwarderStack.OpenSearchDashboardUrl  = https://search-common-logs-dev-<hash>.ap-southeast-2.es.amazonaws.com/_dashboards
-LogForwarderStack.OpenSearchDomainEndpoint= search-common-logs-dev-<hash>.ap-southeast-2.es.amazonaws.com
+LogForwarderStack.LogForwarderArn              = arn:aws:lambda:ap-southeast-2:<ACCOUNT>:function:LogForwarder-dev
+LogForwarderStack.OpenSearchDashboardUrl       = https://search-common-logs-dev-<hash>.ap-southeast-2.es.amazonaws.com/_dashboards
+LogForwarderStack.OpenSearchDomainEndpoint     = search-common-logs-dev-<hash>.ap-southeast-2.es.amazonaws.com
+LogForwarderStack.OpenSearchMasterUserSecretArn= arn:aws:secretsmanager:ap-southeast-2:<ACCOUNT>:secret:/opensearch/common-logs-dev/master-user-<id>
 ```
+
+### Step 2a — Retrieve the Dashboards admin password
+
+Run this immediately after the deploy completes:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id /opensearch/common-logs-dev/master-user \
+  --region ap-southeast-2 \
+  --query SecretString \
+  --output text
+```
+
+Expected output:
+```json
+{"username":"admin","password":"<your-generated-password>"}
+```
+
+> Save this password — you'll need it to log into OpenSearch Dashboards in Part 5.
 
 Confirm the CloudFormation exports are live:
 
@@ -1033,7 +1116,11 @@ aws cloudformation describe-stacks \
   --output text
 ```
 
-2. Open the URL in a browser. Sign in with your AWS IAM credentials (the domain access policy allows all account principals).
+2. Open the URL in a browser. On the login screen enter:
+   - **Username:** `admin`
+   - **Password:** the value retrieved in **Step 2a** above
+
+   > The domain uses Fine-Grained Access Control (FGAC). The domain-level policy is open to `*`, but FGAC governs what each user can read or write — only the `admin` master user has full access by default.
 
 ### Create an index pattern
 
@@ -1172,7 +1259,18 @@ Expected output includes a filter with `destinationArn` pointing to the Log Forw
 #### ✅ 4. OpenSearch index has documents
 
 ```bash
-# Check document count in the lambda-logs index
+# Option A: basic auth with the admin password (simplest with FGAC enabled)
+OPENSEARCH_ENDPOINT=$(aws cloudformation describe-stacks \
+  --stack-name LogForwarderStack \
+  --region ap-southeast-2 \
+  --query 'Stacks[0].Outputs[?OutputKey==`OpenSearchDomainEndpoint`].OutputValue' \
+  --output text)
+
+curl -X GET \
+  "https://${OPENSEARCH_ENDPOINT}/lambda-logs/_count" \
+  -u "admin:<your-password>"
+
+# Option B: AWS SigV4 (works when FGAC is bypassed by an IAM-mapped role)
 curl -X GET \
   "https://${OPENSEARCH_ENDPOINT}/lambda-logs/_count" \
   --aws-sigv4 "aws:amz:ap-southeast-2:es" \
@@ -1213,6 +1311,34 @@ Expected: metrics like `InvoicesReceived`, `InvoicesProcessed`, `ColdStart`, `Te
 
 ## Troubleshooting
 
+#### `User: anonymous is not authorized to perform: es:ESHttpGet`
+
+This error appears when you open the Dashboards URL in a browser and the domain does
+**not** have Fine-Grained Access Control enabled — browser requests arrive without IAM
+credentials and are rejected as "anonymous".
+
+**Fix:** FGAC must be enabled on the domain. FGAC **cannot** be enabled on a
+running domain — you must destroy and redeploy:
+
+```bash
+cd common_services/log-forwarder/infra
+source .venv/bin/activate
+
+# 1. Destroy (RemovalPolicy.DESTROY deletes domain + secret)
+cdk destroy -c account=<ACCOUNT_ID> -c region=ap-southeast-2
+
+# 2. Redeploy with FGAC (included in the current stack definition)
+cdk deploy -c account=<ACCOUNT_ID> -c region=ap-southeast-2
+
+# 3. Retrieve the new admin password
+aws secretsmanager get-secret-value \
+  --secret-id /opensearch/common-logs-dev/master-user \
+  --region ap-southeast-2 \
+  --query SecretString --output text
+```
+
+---
+
 #### `Domain creation failed: ValidationException`
 
 OpenSearch domain names must be 3–28 characters, start with a lowercase letter, and contain only lowercase letters, numbers, and hyphens.
@@ -1250,11 +1376,12 @@ If no logs appear, the subscription filter may not be attached. Re-deploy and ve
 
 #### `AccessDeniedException` when forwarder tries to write to OpenSearch
 
-The domain access policy allows all account principals via `iam.AccountPrincipal(account)`. If you see access denied errors:
+The domain access policy is open (`iam.AnyPrincipal()`), so IAM denials from the
+domain policy itself are unlikely. If you see access denied errors:
 
-1. Confirm the forwarder Lambda execution role ARN belongs to the correct AWS account.
+1. Verify `domain.grant_read_write(log_forwarder_lambda)` is present in the CDK stack — this adds the necessary `es:ESHttp*` IAM policy to the Lambda execution role.
 2. Check there are no SCPs (Service Control Policies) in the organisation blocking `es:*`.
-3. Verify `domain.grant_read_write(log_forwarder_lambda)` is present in the CDK stack.
+3. If FGAC is enabled, confirm the forwarder Lambda's IAM role is mapped to a backend role in OpenSearch Dashboards → Security → Roles (or use the `admin` user for the Lambda role temporarily during testing).
 
 ---
 
@@ -1297,7 +1424,7 @@ Expected: `"notBreaching"`. If it shows `"breaching"`, the CDK change was not de
 | Concern | Dev (this lab) | Production recommendation |
 |---|---|---|
 | OpenSearch sizing | `t3.small`, 1 node, 20 GB | `m6g.large` (or larger), 3+ nodes, Multi-AZ, dedicated master |
-| Fine-grained access control | Disabled (IAM-only) | Enable FGAC with master user + role-based access |
+| Fine-grained access control | Enabled — FGAC with `admin` master user | FGAC + SSO/SAML via identity provider (Okta, Azure AD, etc.) |
 | VPC placement | Public endpoint | Place in private subnets; access via VPN or bastion |
 | Index lifecycle | No policy | Configure ISM (Index State Management) to roll over at 10 GB and delete after 90 days |
 | Log retention | 1 month (CloudWatch) | Match your compliance requirement; configure OpenSearch ISM |
