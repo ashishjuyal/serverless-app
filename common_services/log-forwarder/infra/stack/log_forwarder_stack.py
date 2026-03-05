@@ -50,7 +50,7 @@ class _LocalPipBundler:
     occurs on Windows when the SAM build image doesn't have ``bash`` on PATH.
     """
 
-    def try_bundle(self, output_dir: str, /, **_kwargs) -> bool:  # type: ignore[override]
+    def try_bundle(self, output_dir: str, options: cdk.BundlingOptions) -> bool:  # type: ignore[override]
         try:
             subprocess.run(
                 [
