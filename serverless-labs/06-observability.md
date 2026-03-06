@@ -4,6 +4,104 @@ Gain full visibility into your AI document-processing pipeline with structured l
 
 ---
 
+## How This Demo Maps to the ELK Stack
+
+Before diving into the implementation, it helps to understand the classic ELK stack and exactly which AWS service replaces each component in this lab.
+
+### What is the ELK Stack?
+
+ELK is a widely adopted open-source observability trio used to collect, store, search, and visualise logs at scale.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Classic ELK Stack                                    │
+│                                                                             │
+│   Applications / Servers                                                    │
+│          │                                                                  │
+│          ▼                                                                  │
+│   ┌─────────────┐    ship &     ┌───────────────┐   index &   ┌──────────┐ │
+│   │  Logstash   │  ─────────▶  │ Elasticsearch │  ────────▶  │  Kibana  │ │
+│   │  (ingest)   │   transform   │  (store/search)│   query     │  (UI)    │ │
+│   └─────────────┘               └───────────────┘             └──────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Component | Role |
+|-----------|------|
+| **Logstash** | Collects logs from many sources, parses and transforms them (e.g. JSON extraction, field enrichment), then ships them to Elasticsearch. Acts as the pipeline glue. |
+| **Elasticsearch** | Distributed search and analytics engine. Stores log documents as JSON, builds inverted indexes for fast full-text search, and exposes a REST API for queries and aggregations. |
+| **Kibana** | Web UI for Elasticsearch. Lets you explore raw logs (Discover), build charts/dashboards (Visualise), set up alerts, and create index patterns to describe the data shape. |
+
+> **Why not use the ELK stack directly?**  Running Elasticsearch on EC2 means you manage JVM tuning, cluster sizing, OS patches, snapshots, and HA yourself — typically a dedicated ops task. OpenSearch Service eliminates that operational burden while remaining API-compatible with Elasticsearch 7.x.
+
+---
+
+### ELK → AWS Component Mapping
+
+Every role played by an ELK component is covered by a managed AWS service in this lab.
+
+```
+┌──────────────────┬────────────────────────────────┬──────────────────────────────────────────────┐
+│  ELK Component   │  AWS Equivalent                │  What it does in this demo                   │
+├──────────────────┼────────────────────────────────┼──────────────────────────────────────────────┤
+│ Log producer     │ Orchestrator Lambda            │ Emits structured JSON logs via                │
+│ (application)    │ + AWS Lambda Powertools Logger │ Powertools instead of print()                │
+├──────────────────┼────────────────────────────────┼──────────────────────────────────────────────┤
+│                  │ CloudWatch Logs                │ Automatically captures every stdout/stderr   │
+│ Logstash         │ Subscription Filter            │ line and forwards compressed log batches     │
+│ (collect)        ├────────────────────────────────┤ to the Log Forwarder within ~15 seconds      │
+│                  │ Log Forwarder Lambda           │ Decodes, decompresses, parses JSON,          │
+│                  │ (common_services)              │ enriches with CW metadata, bulk-indexes      │
+├──────────────────┼────────────────────────────────┼──────────────────────────────────────────────┤
+│ Elasticsearch    │ Amazon OpenSearch Service      │ Managed single-node cluster (t3.small),      │
+│ (store & search) │ (index: lambda-logs)           │ stores log documents, full-text search,      │
+│                  │                                │ aggregations via OpenSearch REST API         │
+├──────────────────┼────────────────────────────────┼──────────────────────────────────────────────┤
+│ Kibana           │ OpenSearch Dashboards          │ Bundled with OpenSearch Service; same        │
+│ (visualise)      │                                │ Discover/Visualise/Alerts workflow           │
+├──────────────────┼────────────────────────────────┼──────────────────────────────────────────────┤
+│ Beats / agents   │ (not needed)                   │ CloudWatch natively captures Lambda stdout — │
+│ (sidecar shippers│                                │ no agent installation or sidecar required    │
+└──────────────────┴────────────────────────────────┴──────────────────────────────────────────────┘
+```
+
+### Side-by-side Data Flow
+
+```
+Classic ELK                             This Demo
+───────────────────────────────         ─────────────────────────────────────
+App writes log line                     Orchestrator Lambda writes JSON log
+       │                                       │  (Powertools Logger)
+       ▼                                       ▼
+Filebeat / Logstash agent          CloudWatch Logs (automatic capture)
+       │  parse + enrich                       │  Subscription Filter
+       ▼                                       ▼
+Logstash pipeline                   Log Forwarder Lambda
+       │  bulk index                            │  decode → parse → enrich → bulk index
+       ▼                                       ▼
+Elasticsearch cluster               Amazon OpenSearch Service
+       │  REST API                              │  OpenSearch REST API
+       ▼                                       ▼
+Kibana                              OpenSearch Dashboards
+       │  Discover / Visualise                  │  Discover / Visualise / Alerts
+       ▼                                       ▼
+  Developer / SRE                       Developer / SRE
+```
+
+### Key Differences from Classic ELK
+
+| Aspect | Classic ELK | This Demo |
+|--------|-------------|-----------|
+| **Infrastructure** | You provision and patch Elasticsearch nodes | AWS manages the OpenSearch cluster |
+| **Log shipping agent** | Filebeat or Logstash agent on each server | CloudWatch Logs subscription filter — no agent |
+| **Pipeline code** | Logstash configuration DSL (grok filters, mutate) | Python Lambda function (full language flexibility) |
+| **Authentication** | X-Pack security or open | FGAC — username/password + IAM; admin password stored in Secrets Manager |
+| **Scaling** | Manual shard/replica tuning | AWS handles scaling within instance class |
+| **Cost model** | EC2 + EBS + Elastic licence | Pay-per-node-hour, no licence fee |
+| **Index pattern** | `logstash-*` (conventional) | `lambda-logs` (explicit) |
+
+---
+
 ## Table of Contents
 
 1. [What This Lab Covers](#what-this-lab-covers)

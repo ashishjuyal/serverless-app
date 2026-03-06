@@ -23,7 +23,8 @@
       "Bash(.venvScriptspython -c \"import app\")",
       "Bash(python -c \":*)",
       "Bash(python -m py_compile \"C:\\\\StackRoute\\\\mindsprint-content\\\\serverless-app\\\\serverless-app\\\\common_services\\\\log-forwarder\\\\infra\\\\stack\\\\log_forwarder_stack.py\")",
-      "Bash(git add common_services/log-forwarder/infra/stack/log_forwarder_stack.py common_services/log-forwarder/app/log_forwarder/lambda_function.py)"
+      "Bash(git add common_services/log-forwarder/infra/stack/log_forwarder_stack.py common_services/log-forwarder/app/log_forwarder/lambda_function.py)",
+      "Bash(git add common_services/log-forwarder/infra/stack/log_forwarder_stack.py common_services/log-forwarder/infra/tests/unit/test_log_forwarder_stack.py)"
     ]
   }
 }
