@@ -107,11 +107,11 @@ def lambda_handler(event, context):
             'price': event['price']
         }
         dynamo.put_item(Item=item)
-        return {'statusCode': 201, 'body': json.dumps(item)}
+        return {'statusCode': 201, 'body': json.dumps(item, default=str)}
 
     elif action == 'list':
         result = dynamo.scan()
-        return {'statusCode': 200, 'body': json.dumps(result['Items'])}
+        return {'statusCode': 200, 'body': json.dumps(result['Items'], default=str)}
 ```
 
 3. Click **Deploy**
