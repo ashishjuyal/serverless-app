@@ -197,7 +197,9 @@ aws iam create-role \
       "Action":"sts:AssumeRole"
     }]
   }'
+```
 
+```bash
 # Attach all required policies
 for policy in \
   AWSLambdaBasicExecutionRole \
@@ -215,7 +217,9 @@ for policy in \
     --role-name LambdaLabRole \
     --policy-arn "arn:aws:iam::aws:policy/${policy}" 2>/dev/null || true
 done
+```
 
+```bash
 # grant permission for putting events to EventBridge
 aws iam put-role-policy \
   --role-name LambdaLabRole \
@@ -228,8 +232,6 @@ aws iam put-role-policy \
       "Resource": "*"
     }]
   }'
-
-
 
 echo "LambdaLabRole created successfully"
 ```
