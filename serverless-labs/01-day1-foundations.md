@@ -94,6 +94,7 @@ def lambda_handler(event, context):
 
 ```python
 import json, boto3, uuid
+from decimal import Decimal
 
 dynamo = boto3.resource('dynamodb').Table('Products')
 
@@ -104,7 +105,7 @@ def lambda_handler(event, context):
         item = {
             'productId': str(uuid.uuid4()),
             'name': event['name'],
-            'price': event['price']
+            'price': Decimal(str(event['price']))
         }
         dynamo.put_item(Item=item)
         return {'statusCode': 201, 'body': json.dumps(item, default=str)}
