@@ -299,6 +299,7 @@ Event Source (Lambda)  →  EventBridge (custom bus)  →  Subscriber Lambda(s)
 
 1. Navigate to **EventBridge → Event buses → Create event bus**
    - Name: `ecommerce-events`
+   - Logs: Select `CloudWatch logs`
    - Click **Create**
 
 > A dedicated bus keeps your domain events separate from AWS system events on the default bus.
@@ -375,19 +376,21 @@ def lambda_handler(event, context):
 ---
 ```bash
 # In CloudShell
+# change the account ID in the below command. You will get it from top right, use without hyphens
+
 aws lambda add-permission \
   --function-name OrderNotifier \
   --statement-id EventBridgeInvoke \
   --action lambda:InvokeFunction \
   --principal events.amazonaws.com \
-  --source-arn arn:aws:events:us-east-1:975454609718:rule/ecommerce-events/OrderPlacedRule
+  --source-arn arn:aws:events:us-east-1:775937640988:rule/ecommerce-events/OrderPlacedRule
 
 
-
+# change the account ID in the below command. You will get it from top right, use without hyphens
 aws events put-targets \
   --event-bus-name ecommerce-events \
   --rule OrderPlacedRule \
-  --targets "Id=OrderNotifierTarget,Arn=arn:aws:lambda:us-east-1:975454609718:function:OrderNotifier"
+  --targets "Id=OrderNotifierTarget,Arn=arn:aws:lambda:us-east-1:775937640988:function:OrderNotifier"
 
 ```
 ---
