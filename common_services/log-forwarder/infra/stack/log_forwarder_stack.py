@@ -103,7 +103,6 @@ class LogForwarderStack(BaseServiceStack):
             environment={
                 "OPENSEARCH_ENDPOINT": domain.domain_endpoint,
                 "INDEX_NAME": "lambda-logs",
-                "AWS_REGION": region,
             },
         )
 
