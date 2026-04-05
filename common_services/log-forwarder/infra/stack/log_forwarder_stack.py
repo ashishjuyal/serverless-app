@@ -3,7 +3,7 @@ LogForwarderStack
 =================
 A shared, reusable CDK stack that provisions:
 
-  1. Amazon OpenSearch Service domain  — stores structured log documents
+  1. Amazon  OpenSearch Service domain  — stores structured log documents
   2. Log Forwarder Lambda              — decodes CloudWatch Logs batches
                                          and bulk-indexes them into OpenSearch
 
