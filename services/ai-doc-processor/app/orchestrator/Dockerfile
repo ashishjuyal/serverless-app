@@ -1,6 +1,6 @@
 FROM public.ecr.aws/lambda/python:3.12
 
-# copy function code
+# Copy function code
 COPY . ${LAMBDA_TASK_ROOT}
 
 # Install dependencies
