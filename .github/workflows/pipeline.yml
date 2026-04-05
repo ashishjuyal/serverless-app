@@ -192,7 +192,7 @@ jobs:
 
       - name: Run tests
         working-directory: common_services/log-forwarder/infra
-        run: echo "test"
+        run: pytest tests/ -v
 
 
 # ─────────────────────────────────────────────────────────────
