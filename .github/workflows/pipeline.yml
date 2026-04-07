@@ -17,7 +17,7 @@ permissions:
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  PYTHON_VERSION: "3.14"
+  PYTHON_VERSION: "3.12"
 
 jobs:
 
