@@ -145,13 +145,15 @@ class AiDocProcessorStack(BaseServiceStack):
         )
 
         # ── 3. Grant CloudWatch Logs permission to invoke the forwarder ───────
-        # Function.from_function_arn() returns an imported (unowned) function,
-        # so LambdaDestination cannot auto-add the resource-based policy.
-        # We must do it explicitly, scoped to this log group as the source.
-        log_forwarder_fn.add_permission(
+        # add_permission() on an imported function is a no-op in CDK (it can't
+        # verify the account, so it silently skips creating the resource).
+        # CfnPermission always creates the AWS::Lambda::Permission resource.
+        _lambda.CfnPermission(
+            self,
             "AllowCloudWatchLogsInvoke",
-            principal=iam.ServicePrincipal(f"logs.{region}.amazonaws.com"),
             action="lambda:InvokeFunction",
+            function_name=cdk.Fn.import_value(f"LogForwarderArn-{self.env_name}"),
+            principal=f"logs.{region}.amazonaws.com",
             source_arn=log_group.log_group_arn,
             source_account=account,
         )
