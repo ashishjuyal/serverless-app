@@ -45,10 +45,22 @@ class AiDocProcessorStack(BaseServiceStack):
         # ── Orchestrator Lambda (Docker image) ─────────────────────────────
         orchestrator_lambda_name = f"OrchestratorContainer-{self.env_name}"
 
+        # ── CloudWatch Log Group (created before Lambda so CDK uses it) ───────
+        # Passing log_group= to the Lambda constructor prevents CDK from
+        # auto-generating a second log group that would conflict with this one.
+        log_group = logs.LogGroup(
+            self,
+            "OrchestratorLogGroup",
+            log_group_name=f"/aws/lambda/{orchestrator_lambda_name}",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         orchestrator_lambda = _lambda.DockerImageFunction(
             self,
             "DocumentProcessingOrchestrator",
             function_name=orchestrator_lambda_name,
+            log_group=log_group,
             code=_lambda.DockerImageCode.from_image_asset(
                 "../app/orchestrator",  # folder containing Dockerfile
                 build_args={
@@ -125,15 +137,6 @@ class AiDocProcessorStack(BaseServiceStack):
         # ══════════════════════════════════════════════════════════════════
         # OBSERVABILITY — wires this service into the shared LogForwarderStack
         # ══════════════════════════════════════════════════════════════════
-
-        # ── 1. Explicit CloudWatch Log Group (with retention) ──────────────
-        log_group = logs.LogGroup(
-            self,
-            "OrchestratorLogGroup",
-            log_group_name=f"/aws/lambda/{orchestrator_lambda_name}",
-            retention=logs.RetentionDays.ONE_MONTH,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
 
         # ── 2. Import the shared Log Forwarder Lambda (cross-stack) ────────
         # LogForwarderStack (common_services/log-forwarder) exports this ARN
