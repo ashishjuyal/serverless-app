@@ -32,7 +32,6 @@ class AiDocProcessorStack(BaseServiceStack):
         imagerepo = ecr.Repository(
             self,
             "AIDocProcessorImageRepo",
-            repository_name=f"ai-doc-processor-repo-{self.env_name}",
         )
 
         # ── S3 bucket (document uploads trigger the pipeline) ──────────────
