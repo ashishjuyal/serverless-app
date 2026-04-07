@@ -23,7 +23,6 @@ class InvoiceNotifierStack(BaseServiceStack):
         processed_bucket = s3.Bucket(
             self,
             "ProcessedInvoiceBucket",
-            bucket_name="processedinvoice",
             removal_policy=RemovalPolicy.DESTROY,  # safe cleanup for dev
             auto_delete_objects=True,
         )

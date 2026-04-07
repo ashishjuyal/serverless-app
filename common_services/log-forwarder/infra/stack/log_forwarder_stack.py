@@ -48,6 +48,7 @@ class LogForwarderStack(BaseServiceStack):
             capacity=opensearch.CapacityConfig(
                 data_nodes=1,
                 data_node_instance_type="t3.small.search",
+                multi_az_with_standby_enabled=False,
             ),
             ebs=opensearch.EbsOptions(
                 enabled=True,
