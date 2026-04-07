@@ -145,7 +145,19 @@ class AiDocProcessorStack(BaseServiceStack):
             function_arn=cdk.Fn.import_value(f"LogForwarderArn-{self.env_name}"),
         )
 
-        # ── 3. Subscription Filter → shared Log Forwarder Lambda ──────────
+        # ── 3. Grant CloudWatch Logs permission to invoke the forwarder ───────
+        # Function.from_function_arn() returns an imported (unowned) function,
+        # so LambdaDestination cannot auto-add the resource-based policy.
+        # We must do it explicitly, scoped to this log group as the source.
+        log_forwarder_fn.add_permission(
+            "AllowCloudWatchLogsInvoke",
+            principal=iam.ServicePrincipal(f"logs.{region}.amazonaws.com"),
+            action="lambda:InvokeFunction",
+            source_arn=log_group.log_group_arn,
+            source_account=account,
+        )
+
+        # ── 4. Subscription Filter → shared Log Forwarder Lambda ──────────
         # Every log line written by the orchestrator is forwarded to the
         # Log Forwarder Lambda in near-real time (< 15 s typical latency).
         logs.SubscriptionFilter(
@@ -156,7 +168,7 @@ class AiDocProcessorStack(BaseServiceStack):
             filter_pattern=logs.FilterPattern.all_events(),
         )
 
-        # ── 4. CloudWatch Alarms ───────────────────────────────────────────
+        # ── 5. CloudWatch Alarms ───────────────────────────────────────────
         error_alarm = cloudwatch.Alarm(
             self,
             "OrchestratorErrorAlarm",
@@ -212,7 +224,7 @@ class AiDocProcessorStack(BaseServiceStack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
 
-        # ── 5. CloudFormation Outputs ──────────────────────────────────────
+        # ── 6. CloudFormation Outputs ──────────────────────────────────────
         CfnOutput(self, "ApiUrl", value=api.url)
 
         CfnOutput(
