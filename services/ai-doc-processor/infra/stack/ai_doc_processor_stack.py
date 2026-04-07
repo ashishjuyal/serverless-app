@@ -148,7 +148,7 @@ class AiDocProcessorStack(BaseServiceStack):
         # add_permission() on an imported function is a no-op in CDK (it can't
         # verify the account, so it silently skips creating the resource).
         # CfnPermission always creates the AWS::Lambda::Permission resource.
-        _lambda.CfnPermission(
+        invoke_permission = _lambda.CfnPermission(
             self,
             "AllowCloudWatchLogsInvoke",
             action="lambda:InvokeFunction",
@@ -161,13 +161,17 @@ class AiDocProcessorStack(BaseServiceStack):
         # ── 4. Subscription Filter → shared Log Forwarder Lambda ──────────
         # Every log line written by the orchestrator is forwarded to the
         # Log Forwarder Lambda in near-real time (< 15 s typical latency).
-        logs.SubscriptionFilter(
+        # Explicit DependsOn ensures the Lambda::Permission exists before
+        # CloudFormation attempts to create the SubscriptionFilter — AWS
+        # validates invoke access at subscription creation time.
+        subscription_filter = logs.SubscriptionFilter(
             self,
             "OrchestratorLogSubscription",
             log_group=log_group,
             destination=logs_destinations.LambdaDestination(log_forwarder_fn),
             filter_pattern=logs.FilterPattern.all_events(),
         )
+        subscription_filter.node.add_dependency(invoke_permission)
 
         # ── 5. CloudWatch Alarms ───────────────────────────────────────────
         error_alarm = cloudwatch.Alarm(
