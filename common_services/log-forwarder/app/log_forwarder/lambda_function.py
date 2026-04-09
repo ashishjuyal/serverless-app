@@ -19,7 +19,7 @@ Environment variables
 OPENSEARCH_ENDPOINT  : OpenSearch domain endpoint (no scheme, no trailing slash)
                        e.g. "search-ai-doc-logs-dev-xxx.ap-southeast-2.es.amazonaws.com"
 INDEX_NAME           : OpenSearch index to write into   (default: "lambda-logs")
-AWS_REGION           : AWS region                        (default: "ap-southeast-2")
+AWS_REGION           : AWS region                        (default: "us-east-1")
 """
 
 import base64
@@ -35,7 +35,7 @@ from opensearchpy import AWSV4SignerAuth, OpenSearch, RequestsHttpConnection, he
 # ── Configuration ────────────────────────────────────────────────────────────
 OPENSEARCH_ENDPOINT = os.environ["OPENSEARCH_ENDPOINT"]
 INDEX_NAME = os.environ.get("INDEX_NAME", "lambda-logs")
-REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
+REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 
 def _build_client() -> OpenSearch:
